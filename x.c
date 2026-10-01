@@ -50,6 +50,39 @@ typedef struct {
 #define XK_NO_MOD     0
 #define XK_SWITCH_MOD (1<<13|1<<14)
 
+/* xterm modifier parameter bits; the parameter sent is 1 + their sum */
+enum {
+	KMOD_SHIFT = 1,
+	KMOD_ALT   = 2,
+	KMOD_CTRL  = 4,
+	KMOD_SUPER = 8,
+};
+
+/* keys sent as CSI <n> ; <mod> <final> when modified */
+static const struct {
+	KeySym k;
+	int n;
+	char final;
+} modfuncs[] = {
+	{ XK_Up,     1, 'A' }, { XK_KP_Up,     1, 'A' },
+	{ XK_Down,   1, 'B' }, { XK_KP_Down,   1, 'B' },
+	{ XK_Right,  1, 'C' }, { XK_KP_Right,  1, 'C' },
+	{ XK_Left,   1, 'D' }, { XK_KP_Left,   1, 'D' },
+	{ XK_Begin,  1, 'E' }, { XK_KP_Begin,  1, 'E' },
+	{ XK_Home,   1, 'H' }, { XK_KP_Home,   1, 'H' },
+	{ XK_End,    1, 'F' }, { XK_KP_End,    1, 'F' },
+	{ XK_Insert, 2, '~' }, { XK_KP_Insert, 2, '~' },
+	{ XK_Delete, 3, '~' }, { XK_KP_Delete, 3, '~' },
+	{ XK_Prior,  5, '~' }, { XK_KP_Prior,  5, '~' },
+	{ XK_Next,   6, '~' }, { XK_KP_Next,   6, '~' },
+	{ XK_F1,     1, 'P' }, { XK_F2,       1, 'Q' },
+	{ XK_F3,     1, 'R' }, { XK_F4,       1, 'S' },
+	{ XK_F5,    15, '~' }, { XK_F6,      17, '~' },
+	{ XK_F7,    18, '~' }, { XK_F8,      19, '~' },
+	{ XK_F9,    20, '~' }, { XK_F10,     21, '~' },
+	{ XK_F11,   23, '~' }, { XK_F12,     24, '~' },
+};
+
 /* function definitions used in config.h */
 static void clipcopy(const Arg *);
 static void clippaste(const Arg *);
@@ -81,9 +114,11 @@ typedef XftGlyphFontSpec GlyphFontSpec;
 typedef struct {
 	int tw, th; /* tty width and height */
 	int w, h; /* window width and height */
+	int hborderpx, vborderpx;
 	int ch; /* char height */
 	int cw; /* char width  */
 	int mode; /* window state/mode flags */
+	int modkeys; /* xterm modifyOtherKeys level */
 	int cursor; /* cursor style */
 } TermWindow;
 
@@ -184,6 +219,9 @@ static void setsel(char *, Time);
 static void mousesel(XEvent *, int);
 static void mousereport(XEvent *);
 static char *kmap(KeySym, uint);
+static int kmodbits(uint);
+static int kmodfunc(KeySym, uint, char *, size_t);
+static int kmodother(KeySym, uint, char *, size_t);
 static int match(uint, uint);
 
 static void run(void);
@@ -331,7 +369,7 @@ ttysend(const Arg *arg)
 int
 evcol(XEvent *e)
 {
-	int x = e->xbutton.x - borderpx;
+	int x = e->xbutton.x - win.hborderpx;
 	LIMIT(x, 0, win.tw - 1);
 	return x / win.cw;
 }
@@ -339,7 +377,7 @@ evcol(XEvent *e)
 int
 evrow(XEvent *e)
 {
-	int y = e->xbutton.y - borderpx;
+	int y = e->xbutton.y - win.vborderpx;
 	LIMIT(y, 0, win.th - 1);
 	return y / win.ch;
 }
@@ -349,6 +387,7 @@ mousesel(XEvent *e, int done)
 {
 	int type, seltype = SEL_REGULAR;
 	uint state = e->xbutton.state & ~(Button1Mask | forcemousemod);
+	char *str;
 
 	for (type = 1; type < LEN(selmasks); ++type) {
 		if (match(selmasks[type], state)) {
@@ -357,8 +396,10 @@ mousesel(XEvent *e, int done)
 		}
 	}
 	selextend(evcol(e), evrow(e), seltype, done);
-	if (done)
-		setsel(getsel(), e->xbutton.time);
+	if (done && (str = getsel())) {
+		setsel(str, e->xbutton.time);
+		clipcopy(NULL); /* PRIMARY and CLIPBOARD are kept the same */
+	}
 }
 
 void
@@ -739,6 +780,9 @@ cresize(int width, int height)
 	col = MAX(1, col);
 	row = MAX(1, row);
 
+	win.hborderpx = (win.w - col * win.cw) / 2;
+	win.vborderpx = (win.h - row * win.ch) / 2;
+
 	tresize(col, row);
 	xresize(col, row);
 	ttyresize(win.tw, win.th);
@@ -869,8 +913,8 @@ xhints(void)
 	sizeh->flags = PSize | PResizeInc | PBaseSize | PMinSize;
 	sizeh->height = win.h;
 	sizeh->width = win.w;
-	sizeh->height_inc = win.ch;
-	sizeh->width_inc = win.cw;
+	sizeh->height_inc = 1;
+	sizeh->width_inc = 1;
 	sizeh->base_height = 2 * borderpx;
 	sizeh->base_width = 2 * borderpx;
 	sizeh->min_height = win.ch + 2 * borderpx;
@@ -1245,7 +1289,7 @@ xinit(int cols, int rows)
 int
 xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch, xp, yp;
+	float winx = win.hborderpx + x * win.cw, winy = win.vborderpx + y * win.ch, xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
 	int frcflags = FRC_NORMAL;
@@ -1378,7 +1422,7 @@ void
 xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y)
 {
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
-	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch,
+	int winx = win.hborderpx + x * win.cw, winy = win.vborderpx + y * win.ch,
 	    width = charlen * win.cw;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
@@ -1468,17 +1512,17 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 
 	/* Intelligent cleaning up of the borders. */
 	if (x == 0) {
-		xclear(0, (y == 0)? 0 : winy, borderpx,
+		xclear(0, (y == 0)? 0 : winy, win.hborderpx,
 			winy + win.ch +
-			((winy + win.ch >= borderpx + win.th)? win.h : 0));
+			((winy + win.ch >= win.vborderpx + win.th)? win.h : 0));
 	}
-	if (winx + width >= borderpx + win.tw) {
+	if (winx + width >= win.hborderpx + win.tw) {
 		xclear(winx + width, (y == 0)? 0 : winy, win.w,
-			((winy + win.ch >= borderpx + win.th)? win.h : (winy + win.ch)));
+			((winy + win.ch >= win.vborderpx + win.th)? win.h : (winy + win.ch)));
 	}
 	if (y == 0)
-		xclear(winx, 0, winx + width, borderpx);
-	if (winy + win.ch >= borderpx + win.th)
+		xclear(winx, 0, winx + width, win.vborderpx);
+	if (winy + win.ch >= win.vborderpx + win.th)
 		xclear(winx, winy + win.ch, winx + width, win.h);
 
 	/* Clean up the region we want to draw to. */
@@ -1572,35 +1616,35 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 3: /* Blinking Underline */
 		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
-					borderpx + cx * win.cw,
-					borderpx + (cy + 1) * win.ch - \
+					win.hborderpx + cx * win.cw,
+					win.vborderpx + (cy + 1) * win.ch - \
 						cursorthickness,
 					win.cw, cursorthickness);
 			break;
 		case 5: /* Blinking bar */
 		case 6: /* Steady bar */
 			XftDrawRect(xw.draw, &drawcol,
-					borderpx + cx * win.cw,
-					borderpx + cy * win.ch,
+					win.hborderpx + cx * win.cw,
+					win.vborderpx + cy * win.ch,
 					cursorthickness, win.ch);
 			break;
 		}
 	} else {
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				win.hborderpx + cx * win.cw,
+				win.vborderpx + cy * win.ch,
 				win.cw - 1, 1);
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				win.hborderpx + cx * win.cw,
+				win.vborderpx + cy * win.ch,
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + (cx + 1) * win.cw - 1,
-				borderpx + cy * win.ch,
+				win.hborderpx + (cx + 1) * win.cw - 1,
+				win.vborderpx + cy * win.ch,
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
-				borderpx + (cy + 1) * win.ch - 1,
+				win.hborderpx + cx * win.cw,
+				win.vborderpx + (cy + 1) * win.ch - 1,
 				win.cw, 1);
 	}
 }
@@ -1701,8 +1745,8 @@ xximspot(int x, int y)
 	if (xw.ime.xic == NULL)
 		return;
 
-	xw.ime.spot.x = borderpx + x * win.cw;
-	xw.ime.spot.y = borderpx + (y + 1) * win.ch;
+	xw.ime.spot.x = win.hborderpx + x * win.cw;
+	xw.ime.spot.y = win.vborderpx + (y + 1) * win.ch;
 
 	XSetICValues(xw.ime.xic, XNPreeditAttributes, xw.ime.spotlist, NULL);
 }
@@ -1741,6 +1785,19 @@ xsetmode(int set, unsigned int flags)
 	MODBIT(win.mode, set, flags);
 	if ((win.mode & MODE_REVERSE) != (mode & MODE_REVERSE))
 		redraw();
+}
+
+int
+xgetmodkeys(void)
+{
+	return win.modkeys;
+}
+
+void
+xsetmodkeys(int level)
+{
+	LIMIT(level, 0, 2);
+	win.modkeys = level;
 }
 
 int
@@ -1838,13 +1895,89 @@ kmap(KeySym k, uint state)
 	return NULL;
 }
 
+int
+kmodbits(uint state)
+{
+	return ((state & ShiftMask) ? KMOD_SHIFT : 0) |
+	       ((state & Mod1Mask) ? KMOD_ALT : 0) |
+	       ((state & ControlMask) ? KMOD_CTRL : 0) |
+	       ((state & Mod4Mask) ? KMOD_SUPER : 0);
+}
+
+/* xterm's modified cursor and function keys, sent in every mode */
+int
+kmodfunc(KeySym k, uint state, char *buf, size_t len)
+{
+	int i, mod;
+
+	if (!(mod = kmodbits(state)))
+		return 0;
+	for (i = 0; i < LEN(modfuncs); i++) {
+		if (modfuncs[i].k == k)
+			return snprintf(buf, len, "\033[%d;%d%c",
+			                modfuncs[i].n, mod + 1, modfuncs[i].final);
+	}
+	return 0;
+}
+
+/* xterm's modifyOtherKeys, sent in its CSI u format */
+int
+kmodother(KeySym k, uint state, char *buf, size_t len)
+{
+	int c, mod, legacy, letter;
+
+	if (!win.modkeys || !(mod = kmodbits(state)))
+		return 0;
+
+	switch (k) {
+	case XK_BackSpace:    c = 0177; break;
+	case XK_Tab:
+	case XK_ISO_Left_Tab: c = '\t';  break;
+	case XK_Return:       c = '\r';  break;
+	case XK_Escape:       c = 033;  break;
+	default:
+		if (BETWEEN(k, 0x20, 0x7e) || BETWEEN(k, 0xa0, 0xff))
+			c = k;
+		else if ((k & 0xff000000) == 0x01000000) /* Unicode keysym */
+			c = k & 0x00ffffff;
+		else
+			return 0;
+	}
+
+	/* Shift alone is part of a printable character */
+	if (mod == KMOD_SHIFT && c >= ' ' && c != 0177)
+		return 0;
+	/* Shift-Tab stays CSI Z below level 2 */
+	if (mod == KMOD_SHIFT && c == '\t' && win.modkeys < 2)
+		return 0;
+
+	/*
+	 * Level 1 leaves alone what the legacy encoding can express:
+	 * Alt as an ESC prefix (except ESC [ and ESC O, which start CSI and
+	 * SS3) and Ctrl with keys having a C0 control.
+	 */
+	if (win.modkeys == 1) {
+		letter = BETWEEN(c | 0x20, 'a', 'z');
+		legacy = mod & ~KMOD_ALT;
+		if (c >= ' ' && c != 0177 && !(letter && (mod & KMOD_CTRL)))
+			legacy &= ~KMOD_SHIFT;
+		if (!legacy && !((mod & KMOD_ALT) && (c == '[' || c == 'O')))
+			return 0;
+		if (legacy == KMOD_CTRL && c < 0x80 &&
+		    (letter || strchr(" ?@[\\]^_", c)))
+			return 0;
+	}
+
+	return snprintf(buf, len, "\033[%d;%du", c, mod + 1);
+}
+
 void
 kpress(XEvent *ev)
 {
 	XKeyEvent *e = &ev->xkey;
 	KeySym ksym = NoSymbol;
-	char buf[64], *customkey;
-	int len;
+	char buf[64], seq[32], *customkey;
+	int len, seqlen;
 	Rune c;
 	Status status;
 	Shortcut *bp;
@@ -1867,13 +2000,20 @@ kpress(XEvent *ev)
 		}
 	}
 
-	/* 2. custom keys from config.h */
+	/* 2. modified keys */
+	if ((seqlen = kmodother(ksym, e->state, seq, sizeof seq)) > 0 ||
+	    (seqlen = kmodfunc(ksym, e->state, seq, sizeof seq)) > 0) {
+		ttywrite(seq, seqlen, 1);
+		return;
+	}
+
+	/* 3. custom keys from config.h */
 	if ((customkey = kmap(ksym, e->state))) {
 		ttywrite(customkey, strlen(customkey), 1);
 		return;
 	}
 
-	/* 3. composed string from input method */
+	/* 4. composed string from input method */
 	if (len == 0)
 		return;
 	if (len == 1 && e->state & Mod1Mask) {

@@ -34,6 +34,8 @@ int xgetcolor(int, unsigned char *, unsigned char *, unsigned char *);
 void xseticontitle(char *);
 void xsettitle(char *);
 int xsetcursor(int);
+int xgetmodkeys(void);
+void xsetmodkeys(int);
 void xsetmode(int, unsigned int);
 void xsetpointermotion(int);
 void xsetsel(char *);

@@ -1143,10 +1143,8 @@ csiparse(void)
 	int sep = ';'; /* colon or semi-colon, but not both */
 
 	csiescseq.narg = 0;
-	if (*p == '?') {
-		csiescseq.priv = 1;
-		p++;
-	}
+	if (*p == '?' || *p == '>')
+		csiescseq.priv = *p++;
 
 	csiescseq.buf[csiescseq.len] = '\0';
 	while (p < csiescseq.buf+csiescseq.len) {
@@ -1616,6 +1614,14 @@ csihandle(void)
 	char buf[40];
 	int len;
 
+	if (csiescseq.priv == '>') {
+		/* XTMODKEYS -- only modifyOtherKeys is supported */
+		if (csiescseq.mode[0] != 'm' || csiescseq.arg[0] != 4)
+			goto unknown;
+		xsetmodkeys(csiescseq.narg > 1 ? csiescseq.arg[1] : 0);
+		return;
+	}
+
 	switch (csiescseq.mode[0]) {
 	default:
 	unknown:
@@ -1785,6 +1791,15 @@ csihandle(void)
 		tsetmode(csiescseq.priv, 1, csiescseq.arg, csiescseq.narg);
 		break;
 	case 'm': /* SGR -- Terminal attribute (color) */
+		if (csiescseq.priv) {
+			/* XTQMODKEYS -- only modifyOtherKeys is supported */
+			if (csiescseq.arg[0] != 4)
+				goto unknown;
+			len = snprintf(buf, sizeof(buf), "\033[>4;%dm",
+			               xgetmodkeys());
+			ttywrite(buf, len, 0);
+			break;
+		}
 		tsetattr(csiescseq.arg, csiescseq.narg);
 		break;
 	case 'n': /* DSR -- Device Status Report */
@@ -2367,6 +2382,7 @@ eschandle(uchar ascii)
 		xloadcols();
 		xsetmode(0, MODE_HIDE);
 		xsetmode(0, MODE_BRCKTPASTE);
+		xsetmodkeys(0);
 		break;
 	case '=': /* DECPAM -- Application keypad */
 		xsetmode(1, MODE_APPKEYPAD);
